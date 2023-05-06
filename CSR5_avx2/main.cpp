@@ -283,16 +283,17 @@ int main(int argc, char ** argv)
     srand(time(NULL));
 
     // set csrValA to 1, easy for checking floating-point results
-    for (int i = 0; i < nnzA; i++)
-    {
-        csrValA[i] = rand() % 10;
-    }
+    // for (int i = 0; i < nnzA; i++)
+    // {
+    //     csrValA[i] = rand() % 10;
+    // }
 
     cout << " ( " << m << ", " << n << " ) nnz = " << nnzA << endl;
 
     VALUE_TYPE *x = (VALUE_TYPE *)_mm_malloc(n * sizeof(VALUE_TYPE), ANONYMOUSLIB_X86_CACHELINE);
     for (int i = 0; i < n; i++)
-        x[i] = rand() % 10;
+        x[i] = 1;
+        // x[i] = rand() % 10;
 
     VALUE_TYPE *y = (VALUE_TYPE *)_mm_malloc(m * sizeof(VALUE_TYPE), ANONYMOUSLIB_X86_CACHELINE);
     VALUE_TYPE *y_ref = (VALUE_TYPE *)_mm_malloc(m * sizeof(VALUE_TYPE), ANONYMOUSLIB_X86_CACHELINE);
