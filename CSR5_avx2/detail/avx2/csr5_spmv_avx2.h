@@ -366,11 +366,23 @@ void spmv_csr5_compute_kernel(const iT           *d_column_index,
                         printf("\ny_offset128i after modify\n");
                         p128_dec_i32(y_offset128i);
 
-                        
-                        // tmp256i = (not (direct256i == 1)) and (local_bit256i == 1) = 
+                        printf("\ncalculating tmp256i\n");
+                        printf("\ndirect256i\n");
+                        p256_bin_i64(direct256i);
+
+                        printf("\nlocal_bit256i\n");
+                        p256_bin_i64(local_bit256i);
+
+                        // tmp256i = (not (direct256i == 1)) and (local_bit256i == 1) 即 direct256i == 0 && local_bit256i == 1
+                        // tmp256i == 1, 则表示到了red的结尾：direct256i == 0表明上面是unsealed, local_bit256i == 1表明遇到了True.
                         tmp256i = _mm256_andnot_si256(
                                     _mm256_cmpeq_epi64(direct256i, _mm256_set1_epi64x(0x1)),
                                     _mm256_cmpeq_epi64(local_bit256i, _mm256_set1_epi64x(0x1)));
+
+                        // 下面这种写法也对
+                        // tmp256i = _mm256_and_si256(
+                        //             _mm256_cmpeq_epi64(direct256i, _mm256_set1_epi64x(0x0)),
+                        //             _mm256_cmpeq_epi64(local_bit256i, _mm256_set1_epi64x(0x1)));
 
                         printf("\ntmp256i tmp256i\n");
                         p256_bin_i64(tmp256i);
@@ -381,14 +393,18 @@ void spmv_csr5_compute_kernel(const iT           *d_column_index,
                         printf("\nsum256d before\n");
                         p256_d64(sum256d);
 
-                        // if(tmp256i == 0) first_sum256d = first_sum256d
-                        // if(tmp256i == 1) first_sum256d = sum256d
+                        // if(tmp256i == 0) then not end of red:  first_sum256d = first_sum256d
+                        // if(tmp256i == 1) then end of red:  first_sum256d = sum256d
+                        // first_sum256d相当于伪代码里的tmp[i - 1]
                         first_sum256d = _mm256_add_pd(
                                     _mm256_and_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(tmp256i, _mm256_set1_epi64x(0))),   first_sum256d),
                                     _mm256_and_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(tmp256i, _mm256_set1_epi64x(0xFFFFFFFFFFFFFFFF))), sum256d));
                         printf("\nfirst_sum256d after\n");
                         p256_d64(first_sum256d);
 
+                        // if(local_bit256i == 0) sum256d = sum256d 
+                        // else sum256d = 0
+                        // 到了一个segment的尾部就要把sum置为0
                         sum256d = _mm256_and_pd(_mm256_castsi256_pd(_mm256_cmpeq_epi64(local_bit256i, _mm256_set1_epi64x(0))), sum256d);
                         printf("\nsum256d after\n");
                         p256_d64(sum256d);
@@ -400,25 +416,50 @@ void spmv_csr5_compute_kernel(const iT           *d_column_index,
                         printf("\ndirect256i after\n");
                         p256_bin_i64(direct256i);
 
+                        printf("\nstop256i before\n");
+                        p256_bin_i64(stop256i);
+                        // local_bit bit_flag累计求和
                         stop256i = _mm256_add_epi64(stop256i, local_bit256i);
+                        printf("\nstop256i after\n");
+                        p256_bin_i64(stop256i);
                     }
-
+                    // sum = sum + A * x;
                     value256d = _mm256_load_pd(&d_value_partition[i * ANONYMOUSLIB_CSR5_OMEGA]);
                     sum256d = _mm256_fmadd_pd(value256d, x256d, sum256d);
                 }
 
+                // TODO 循环结束, 最后一行的4个lane要处理?
+
+                // direct256i是每个lane所有bit_flag的 or, 为1表示有true, 为0表示, 整列bit_flag都是false
                 tmp256i = _mm256_cmpeq_epi64(direct256i, _mm256_set1_epi64x(0x1));
 
+                // 如果此列bit_flag全为False, 则把first_sum256d置为0, 否则保留
+                // 置0是因为没有遇到某个segment的end, sum没有置为0, first_sum256d中的值在sum_256d中已经加过了
                 first_sum256d = _mm256_and_pd(_mm256_castsi256_pd(tmp256i), first_sum256d);
-                tmp256i = _mm256_cmpeq_epi64(tmp256i, _mm256_set1_epi64x(0));
+
+                // new tmp256i == 1  <==>  old tmp256i == 0  <=>  (direct256i == 1) == 0  <=>  direct256i == 0 <==> 整列bit_flag都是false
+                // tmp256i = _mm256_cmpeq_epi64(tmp256i, _mm256_set1_epi64x(0)); 
+                // 上一行也可以写成下面这种形式, 这样写更好理解
+                tmp256i = _mm256_cmpeq_epi64(direct256i, _mm256_set1_epi64x(0));
+
+                // if(tmp256i == 1)  first_sum256d = first_sum256d + sum256d, 整列bit_flag都是false, 则当前的sum要加到前一列, 相当于伪代码中的last_tmp[i] += tmp[i]
+                // if(tmp256i == 0)  first_sum256d = first_sum256d
                 first_sum256d = _mm256_add_pd(first_sum256d, _mm256_and_pd(_mm256_castsi256_pd(tmp256i), sum256d));
 
                 last_sum256d = sum256d;
 
+                // 第一行的bit_flag, 且bit_flag[0, 0] 已设置为true
                 tmp256i = _mm256_cmpeq_epi64(start256i, _mm256_set1_epi64x(0x1));
+                // 如果第一行为1, 则sum256d = first_sum256d
                 sum256d = _mm256_and_pd(_mm256_castsi256_pd(tmp256i), first_sum256d);
 
+                // 0x39 = 00 11 10 01
+                // old sum256d = (s3, s2, s1, s0)
+                // new sum256d = (s0, s3, s2, s1) after permute
+
+                // TODO print to see
                 sum256d = _mm256_permute4x64_pd(sum256d, 0x39);
+                // sum256d = ()
                 sum256d = _mm256_and_pd(_mm256_castsi256_pd(_mm256_setr_epi64x(0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x0000000000000000)), sum256d);
 
                 tmp_sum256d = sum256d;
