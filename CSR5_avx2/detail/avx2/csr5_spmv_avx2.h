@@ -80,6 +80,12 @@ void p128_dec_i32(__m128i in) {
     printf("v2_u64: %d %d %d %d\n", v[0], v[1], v[2], v[3]);
 }
 
+void p256_dec_i32(__m256i in) {
+    alignas(16) int32_t v[8];
+    _mm256_store_si256((__m256i*)v, in);
+    printf("v2_u64: %d %d %d %d %d %d %d %d\n", v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+}
+
 
 template<typename iT, typename vT>
 inline void partition_fast_track(const vT           *d_value_partition,
@@ -456,24 +462,71 @@ void spmv_csr5_compute_kernel(const iT           *d_column_index,
                 // 0x39 = 00 11 10 01
                 // old sum256d = (s3, s2, s1, s0)
                 // new sum256d = (s0, s3, s2, s1) after permute
-
-                // TODO print to see
+                printf("sum256d before permute\n");
+                p256_d64(sum256d);
                 sum256d = _mm256_permute4x64_pd(sum256d, 0x39);
-                // sum256d = ()
+                printf("sum256d after permute\n");
+                p256_d64(sum256d);
+
+                // sum256d = (0, s3, s2, s1)
                 sum256d = _mm256_and_pd(_mm256_castsi256_pd(_mm256_setr_epi64x(0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF, 0x0000000000000000)), sum256d);
+                printf("sum256d after cast and, ie. tmp_sum256d\n");
+                p256_d64(sum256d);
+
+                // 接下来是求tmp_sum256d的fast segmented sum
+                // 设seg_offset[i] = k
+                // sum[i]为a[i]的前缀和
+                // seg_offset[i] = seg_offset[i] + k = i + k
+                // 经过permute后，new_sum[i]表示前i + k个数的和
+                // new_sum[i]与sum[i]相减得到tmp[i]，则tmp[i]表示从i开始后面k个数的和
+                // 再与a[i] + tmp[i] 即表法fast_segmented_sum
 
                 tmp_sum256d = sum256d;
                 sum256d = hscan_avx(sum256d);
-
+                printf("sum256d after inclusive sum\n");
+                p256_d64(sum256d);
+                
+                // seg_offset
+                printf("scansum_offset128i\n");
+                p128_dec_i32(scansum_offset128i);
+                // TODO 这一步是什么含义？
                 scansum_offset128i = _mm_add_epi32(scansum_offset128i, _mm_set_epi32(3, 2, 1, 0));
+                printf("scansum_offset128i add (3, 2, 1, 0)\n");
+                p128_dec_i32(scansum_offset128i);
 
+
+                // 下面这两步是因为，原本的是4位，要用它作为64位double的mask，因此需要将其扩展一下，连续两个数操作的是一个double
                 tmp256i = _mm256_castsi128_si256(scansum_offset128i);
+                printf("scansum_offset128i cast to 256i\n");
+                p256_dec_i32(tmp256i);
                 tmp256i = _mm256_permutevar8x32_epi32(tmp256i, _mm256_set_epi32(3, 3, 2, 2, 1, 1, 0, 0));
+                printf("scansum_offset128i permutevar8x32\n");
+                p256_dec_i32(tmp256i);
+
                 tmp256i = _mm256_add_epi32(tmp256i, tmp256i);
+                printf("tmp256i + tmp256i\n");
+                p256_dec_i32(tmp256i);
                 tmp256i = _mm256_add_epi32(tmp256i, _mm256_set_epi32(1, 0, 1, 0, 1, 0, 1, 0));
+                printf("tmp256i + (1, 0, 1, 0, 1, 0, 1, 0)\n");
+                p256_dec_i32(tmp256i);
+
+
+
+                // printf("Usage of _mm256_permutevar8x32_epi32\n");
+                // p256_dec_i32(_mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0));
+                // p256_dec_i32(_mm256_permutevar8x32_epi32(_mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0), _mm256_set_epi32(2, 2, 4, 4, 1, 0, 1, 0)));
+                // 后面一个操作数，每个lane是下标，把该下标对应的数放到dst对应的lane中
+
+                printf("calculating sum256d\n");
+                p256_d64(sum256d);
+                p256_d64(_mm256_castsi256_pd(_mm256_permutevar8x32_epi32(_mm256_castpd_si256(sum256d), tmp256i)));
 
                 sum256d = _mm256_sub_pd(_mm256_castsi256_pd(_mm256_permutevar8x32_epi32(_mm256_castpd_si256(sum256d), tmp256i)), sum256d);
+                p256_d64(sum256d);
                 sum256d = _mm256_add_pd(sum256d, tmp_sum256d);
+                p256_d64(sum256d);
+                // 到此, fast_segmented_sumy计算结束
+                // 此时sum256d中保存的是fast segmented sum
 
                 tmp256i = _mm256_cmpgt_epi64(start256i, stop256i);
                 tmp256i = _mm256_cmpeq_epi64(tmp256i, _mm256_set1_epi64x(0));
